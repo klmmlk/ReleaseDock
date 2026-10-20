@@ -171,7 +171,7 @@ import { checkForUpdate } from "./client/src/index";
 import { downloadToFile } from "./client/src/node"; // Electron 主进程/Node
 ```
 
-## 所有语言共同的坑
+# 所有语言共同的坑
 
 1. `client_id` 必须持久化且全局唯一（UUID v4），丢失会重进灰度判定。
 2. 响应字段是蛇形命名（`update_available`、`download_url`、`sha256`），JSON 反序列化注意映射。
@@ -179,3 +179,4 @@ import { downloadToFile } from "./client/src/node"; // Electron 主进程/Node
 4. 429 要退避重试（建议等下一个检查周期，不要立即重试）。
 5. Windows 下写完安装包临时文件后，再启动安装器前记得 Flush + Close 句柄。
 6. 校验失败必须删除半成品文件再重试一次，避免"损坏的安装包被重复执行"。
+
