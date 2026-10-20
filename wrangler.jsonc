@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "releasedock",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-05",
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "releasedock",
+      "database_id": "ee7cd293-6b24-4faa-b883-d068ab0a4be8"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "releasedock-packages"
+    }
+  ],
+  // 阶段二：基础监控，写入 Workers Analytics Engine
+  // 注意：需要在控制台开通 Analytics Engine：https://dash.cloudflare.com/?to=/:account/workers/analytics-engine
+  // 开通前可临时注释掉本段部署（代码对绑定缺失有兜底，仅监控不可用）。
+  // 阶段二：基础监控，写入 Workers Analytics Engine
+  //（已开通：https://dash.cloudflare.com/?to=/:account/workers/analytics-engine）
+  "analytics_engine_datasets": [
+    {
+      "binding": "METRICS",
+      "dataset": "releasedock_metrics"
+    }
+  ],
+  // 阶段三：速率限制（beta 绑定）。查询 120 次/分（按 client_id/IP），下载 30 次/分（按 IP）
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "RATE_LIMIT_UPDATES",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": { "limit": 120, "period": 60 }
+      },
+      {
+        "name": "RATE_LIMIT_DOWNLOAD",
+        "type": "ratelimit",
+        "namespace_id": "1002",
+        "simple": { "limit": 30, "period": 60 }
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "releasedock-client",
+  "version": "0.1.0",
+  "description": "ReleaseDock 客户端更新库：版本查询、下载、SHA-256 校验（Web API 实现，Node/Electron/浏览器通用）",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "typescript": "^5.7.3"
+  }
+}

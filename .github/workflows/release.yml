@@ -1,0 +1,110 @@
+# ReleaseDock 发布流水线示例（开发文档 7.2 CI 集成建议）
+#
+# 用法：在 GitHub Actions 手动触发（workflow_dispatch），按需填写参数。
+# 需要在仓库 Secrets 中配置：
+#   CLOUDFLARE_API_TOKEN      —— 具备 R2 写入权限的 API Token
+#   RELEASEDOCK_ADMIN_TOKEN   —— ReleaseDock 管理接口 Bearer Token
+#
+# 各软件仓库复制本文件后，把「构建产物」步骤替换为真实构建命令即可。
+
+name: ReleaseDock 发布
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_id:
+        description: "应用标识，如 com.yourco.product-a"
+        required: true
+      channel:
+        description: "通道"
+        required: true
+        default: "stable"
+        type: choice
+        options: [stable, beta]
+      version:
+        description: "语义化版本号，如 1.5.0"
+        required: true
+      artifact_path:
+        description: "要分发的构建产物路径（相对仓库根目录）"
+        required: true
+      rollout:
+        description: "灰度百分比 0-100"
+        required: true
+        default: "100"
+      promote:
+        description: "登记后是否立即上线（建议先 false 验证，再手动触发一次勾选）"
+        required: true
+        default: "false"
+        type: boolean
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # TODO: 替换为真实构建命令，产物路径须与 artifact_path 一致
+      - name: 构建产物
+        run: |
+          if [ ! -f "${{ github.event.inputs.artifact_path }}" ]; then
+            echo "产物不存在：请把本步骤替换为真实构建命令" >&2
+            exit 1
+          fi
+
+      - name: 计算校验和
+        id: meta
+        run: |
+          FILE="${{ github.event.inputs.artifact_path }}"
+          echo "sha256=$(sha256sum "$FILE" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$FILE")" >> "$GITHUB_OUTPUT"
+          echo "r2_key=${{ github.event.inputs.app_id }}/${{ github.event.inputs.channel }}/${{ github.event.inputs.version }}/$(basename "$FILE")" >> "$GITHUB_OUTPUT"
+
+      - name: 上传到 R2
+        run: |
+          npx wrangler r2 object put "releasedock-packages/${{ steps.meta.outputs.r2_key }}" \
+            --file "${{ github.event.inputs.artifact_path }}" --remote --content-type application/octet-stream
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: 登记版本（draft）
+        id: register
+        run: |
+          CHANGELOG=$(printf '%s\n' "${{ github.event.inputs.version }} 发布" | jq -Rs '{changelog: (split("\n") | map(select(length > 0)))}')
+          BODY=$(jq -n --arg app "${{ github.event.inputs.app_id }}" \
+                      --arg channel "${{ github.event.inputs.channel }}" \
+                      --arg version "${{ github.event.inputs.version }}" \
+                      --arg r2_key "${{ steps.meta.outputs.r2_key }}" \
+                      --arg sha256 "${{ steps.meta.outputs.sha256 }}" \
+                      --argjson size "${{ steps.meta.outputs.size }}" \
+                      --argjson changelog "$(echo "$CHANGELOG" | jq .changelog)" \
+                      --argjson rollout "${{ github.event.inputs.rollout }}" \
+                      '{app_id: $app, channel: $channel, version: $version, r2_key: $r2_key,
+                        sha256: $sha256, size: $size, changelog: $changelog, rollout: $rollout,
+                        created_by: "github-actions"}')
+          RESPONSE=$(curl -sf -X POST "${{ vars.RELEASEDOCK_BASE_URL || 'https://releasedock.xxxxx.workers.dev' }}/v1/admin/releases" \
+            -H "Authorization: Bearer ${{ secrets.RELEASEDOCK_ADMIN_TOKEN }}" \
+            -H "Content-Type: application/json" -d "$BODY")
+          RELEASE_ID=$(echo "$RESPONSE" | jq -r .release_id)
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "已登记 release_id=$RELEASE_ID（draft）"
+
+      - name: 查询当前指针并上线
+        if: ${{ github.event.inputs.promote == 'true' }}
+        run: |
+          BASE="${{ vars.RELEASEDOCK_BASE_URL || 'https://releasedock.xxxxx.workers.dev' }}"
+          AUTH="Authorization: Bearer ${{ secrets.RELEASEDOCK_ADMIN_TOKEN }}"
+          # 乐观并发控制：以上线前查到的 live 版本作为期望指针（首次上线为 null）
+          EXPECTED=$(curl -sf "$BASE/v1/admin/releases?app_id=${{ github.event.inputs.app_id }}&channel=${{ github.event.inputs.channel }}&status=live" \
+            -H "$AUTH" | jq -r '.releases[0].id // "null"')
+          BODY=$(jq -n --arg expected "$EXPECTED" \
+            '{expected_current_release_id: (if $expected == "null" then null else $expected end), reason: "CI 发布"}')
+          curl -sf -X POST "$BASE/v1/admin/releases/${{ steps.register.outputs.release_id }}/promote" \
+            -H "$AUTH" -H "Content-Type: application/json" -d "$BODY"
+          echo "已上线 ${{ github.event.inputs.version }}（release_id=${{ steps.register.outputs.release_id }}）"
+
+      - name: 发布记录
+        run: echo "version=${{ github.event.inputs.version }} release_id=${{ steps.register.outputs.release_id }}"
