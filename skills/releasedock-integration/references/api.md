@@ -65,6 +65,7 @@ GET /v1/download/{release_id}
 | :--- | :--- | :--- |
 | `POST /v1/admin/apps` | `{"app_id","name"}` | 创建应用；`app_id` 须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`；重复 409 `APP_ALREADY_EXISTS` |
 | `GET /v1/admin/apps` | — | 应用列表 |
+| `POST /v1/admin/uploads/presign` | `{"app_id","channel","version","filename","expires_seconds"?}` | 签发 R2 预签名 PUT URL（默认 15 分钟，60–86400 秒），返回 `upload_url/method/headers/r2_key/expires_at`。客户端对 `upload_url` 直接 PUT，**不要附加任何自定义头**；对象键固定为 `{app_id}/{channel}/{version}/{filename}`；已被 live/archived 占用的键返回 409 `KEY_ALREADY_LIVE`；服务端未配置 R2 凭据返回 503 `UPLOAD_NOT_CONFIGURED` |
 | `POST /v1/admin/releases` | 见下 | 登记 draft 版本 |
 | `POST /v1/admin/releases/{id}/promote` | `{"expected_current_release_id": <string\|null>, "reason"?, "operator"?}` | 上线；expected 缺省/null = 期望通道无生效版本（仅首次上线）；指针不符 409 `POINTER_CONFLICT`；已是 live 409 `RELEASE_NOT_PROMOTABLE` |
 | `POST /v1/admin/releases/{id}/rollback` | `{"expected_current_release_id": <必填>, "reason"?}` | 回滚到该版本；目标不能是 draft |
@@ -90,7 +91,7 @@ GET /v1/download/{release_id}
 
 约束：同 `app_id+channel+version` 唯一（409 `VERSION_ALREADY_EXISTS`）；`channel` 匹配 `^[a-z0-9][a-z0-9_-]{0,31}$`；`r2_key` 不以 `/` 开头；`size` 为正整数；应用须存在且 `active`。上线/回滚前服务端会校验 R2 对象存在，缺失返回 404 `R2_OBJECT_NOT_FOUND`。
 
-R2 对象键约定：`{app_id}/{channel}/{version}/{filename}`；文件一经上线不要覆盖同键。
+R2 对象键约定：`{app_id}/{channel}/{version}/{filename}`；文件一经上线不要覆盖同键（上传预签名与登记接口都会拒绝）。
 
 ## 4. 错误格式与错误码
 
@@ -104,7 +105,8 @@ R2 对象键约定：`{app_id}/{channel}/{version}/{filename}`；文件一经上
 | 401 | `UNAUTHORIZED` | 管理 Token 缺失或错误 |
 | 403 | `FORBIDDEN` | 应用已停用等 |
 | 404 | `APP_NOT_FOUND` / `CHANNEL_NOT_FOUND` / `RELEASE_NOT_FOUND` / `R2_OBJECT_NOT_FOUND` | 资源不存在 |
-| 409 | `VERSION_ALREADY_EXISTS` / `POINTER_CONFLICT` / `RELEASE_NOT_PROMOTABLE` / `APP_ALREADY_EXISTS` | 冲突与状态不允许 |
+| 409 | `VERSION_ALREADY_EXISTS` / `POINTER_CONFLICT` / `RELEASE_NOT_PROMOTABLE` / `APP_ALREADY_EXISTS` / `KEY_ALREADY_LIVE` | 冲突与状态不允许 |
+| 503 | `UPLOAD_NOT_CONFIGURED` | 服务端未配置 R2 S3 凭据，无法签发上传链接（改用 wrangler/S3 工具上传） |
 | 429 | `RATE_LIMITED` | 超过限流，应退避 |
 | 500 | `INTERNAL_ERROR` | 服务端错误 |
 

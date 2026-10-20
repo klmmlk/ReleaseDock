@@ -58,9 +58,16 @@ TOKEN="Authorization: Bearer dev-admin-token-change-me"
 curl -X POST $BASE/v1/admin/apps -H "$TOKEN" -H "Content-Type: application/json" \
   -d '{"app_id":"com.example.demo","name":"Demo App"}'
 
-# 2. Upload the update package to R2 (add --remote for real environments)
-npx wrangler r2 object put releasedock-packages/com.example.demo/stable/1.0.0/setup.exe \
-  --file ./your-setup.exe --local
+# 2. Upload the package — recommended: presigned URL via the admin API.
+#    Only the admin token is needed; no Cloudflare S3 credentials on the client side.
+curl -X POST $BASE/v1/admin/uploads/presign -H "$TOKEN" -H "Content-Type: application/json" \
+  -d '{"app_id":"com.example.demo","channel":"stable","version":"1.0.0","filename":"setup.exe"}'
+# -> {"upload_url":"https://<account>.r2.cloudflarestorage.com/releasedock-packages/…?X-Amz-Signature=…",
+#     "method":"PUT","headers":{},"r2_key":"com.example.demo/stable/1.0.0/setup.exe","expires_at":"…"}
+curl -X PUT --data-binary @./your-setup.exe "<upload_url>"    # send NO extra headers
+
+# Alternative (CI with R2 credentials available):
+# npx wrangler r2 object put releasedock-packages/com.example.demo/stable/1.0.0/setup.exe --file ./your-setup.exe --remote
 
 # 3. Register the release (draft, invisible to clients)
 curl -X POST $BASE/v1/admin/releases -H "$TOKEN" -H "Content-Type: application/json" \
@@ -155,6 +162,11 @@ npx wrangler d1 create releasedock        # put the returned database_id into wr
 npx wrangler r2 bucket create releasedock-packages   # R2 must be enabled in the dashboard first
 npm run db:migrate:remote
 npx wrangler secret put ADMIN_TOKEN       # production admin token, never reuse the local one
+# presigned uploads need an R2 S3 API token (dashboard → R2 → Manage API Tokens, Object Read & Write
+# scoped to releasedock-packages). Skip these three if you upload with wrangler/cli instead.
+npx wrangler secret put R2_ACCOUNT_ID
+npx wrangler secret put R2_ACCESS_KEY_ID
+npx wrangler secret put R2_SECRET_ACCESS_KEY
 npm run deploy
 ```
 
@@ -170,6 +182,7 @@ It is recommended to also protect `/v1/admin/*` with Cloudflare Access (service 
 | Changelog stitching scope | All **published** releases (live + archived). Promoting archives the replaced release, so live-only queries would break multi-version stitching |
 | Promote/rollback validation | The R2 object must exist before the pointer moves, preventing broken releases (`R2_OBJECT_NOT_FOUND`) |
 | App management | Added `POST/GET /v1/admin/apps` (not in the spec, required to onboard apps) |
+| Package upload | Added `POST /v1/admin/uploads/presign`: returns a 15-min AWS SigV4 presigned R2 PUT URL (path-style), so downstreams need only the admin token — no Cloudflare S3 credentials. Requires `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` secrets, else 503 `UPLOAD_NOT_CONFIGURED`. Clients must send **no** extra headers (manual `host`/`x-amz-content-sha256` breaks the signature). Signing refuses keys already used by a live/archived release (409 `KEY_ALREADY_LIVE`) |
 | Rollout adjustment | Added `PATCH /v1/admin/releases/:releaseId` (needed for spec 6.1 "adjustable at any time") |
 | Rollback concurrency control | `expected_current_release_id` required to prevent accidental rollbacks |
 | Rate limiting | Workers ratelimit bindings: 120/min for queries (by client_id/IP), 30/min for downloads (by IP), 429 when exceeded |

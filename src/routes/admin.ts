@@ -3,10 +3,12 @@ import type { Env, PromoteRequest, RegisterReleaseRequest, ReleaseStatus } from 
 import { Errors } from "../errors";
 import { adminAuth } from "../middleware/adminAuth";
 import { parseChangelog } from "../services/changelog";
+import { presignR2Put } from "../services/presign";
 import {
   getApp,
   getChannel,
   getReleaseById,
+  getReleaseByKey,
   getReleaseByVersion,
   insertApp,
   listApps,
@@ -99,6 +101,8 @@ admin.post("/admin/releases", async (c) => {
   ) {
     throw Errors.invalidRequest("r2_key 必须是不以 / 开头、长度 1-512 的对象键");
   }
+  // 阻止覆盖已发布版本对应的对象（开发文档 3.2 约束）
+  if (await getReleaseByKey(c.env.DB, req.r2_key)) throw Errors.keyAlreadyLive();
   if (typeof req.sha256 !== "string" || !SHA256_RE.test(req.sha256.toLowerCase())) {
     throw Errors.invalidRequest("sha256 必须是 64 位十六进制字符串");
   }
@@ -335,4 +339,69 @@ admin.patch("/admin/releases/:releaseId", async (c) => {
 
   await updateRollout(c.env.DB, release, rollout as number, operator, nowIso());
   return c.json({ release_id: releaseId, rollout, message: "已更新" });
+});
+
+// ---------- 上传预签名（让下游用同一管理 Token 直接 PUT 到 R2，无需 Cloudflare 后台） ----------
+
+const FILENAME_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+admin.post("/admin/uploads/presign", async (c) => {
+  const body = await readJsonBody(c);
+  if (!isRecord(body)) throw Errors.invalidRequest("请求体必须是 JSON 对象");
+
+  const { app_id, channel, version, filename, expires_seconds } = body as Record<string, unknown>;
+  if (typeof app_id !== "string" || app_id.length === 0 || app_id.length > 128) {
+    throw Errors.invalidRequest("app_id 缺失或格式错误");
+  }
+  if (typeof channel !== "string" || !CHANNEL_RE.test(channel)) {
+    throw Errors.invalidRequest("channel 必须由小写字母/数字开头，仅含小写字母、数字、下划线、连字符，长度 1-32");
+  }
+  if (typeof version !== "string" || !isValidVersion(version)) {
+    throw Errors.invalidRequest("version 必须是语义化版本号，如 1.3.0");
+  }
+  if (typeof filename !== "string" || !FILENAME_RE.test(filename)) {
+    throw Errors.invalidRequest("filename 必须由字母/数字/点/下划线/连字符组成，长度 1-128");
+  }
+  if (
+    expires_seconds !== undefined &&
+    (!Number.isInteger(expires_seconds) || (expires_seconds as number) < 60 || (expires_seconds as number) > 86400)
+  ) {
+    throw Errors.invalidRequest("expires_seconds 必须是 60-86400 之间的整数（默认 900）");
+  }
+
+  const r2Key = `${app_id}/${channel}/${version}/${filename}`;
+
+  // 拒绝为已发布对象签发（避免上游误覆盖）——draft 允许覆盖（替换 draft 文件是常见操作）
+  if (await getReleaseByKey(c.env.DB, r2Key)) throw Errors.keyAlreadyLive();
+
+  if (
+    !c.env.R2_ACCOUNT_ID ||
+    !c.env.R2_ACCESS_KEY_ID ||
+    !c.env.R2_SECRET_ACCESS_KEY
+  ) {
+    throw Errors.uploadNotConfigured();
+  }
+  const bucket = c.env.R2_BUCKET_NAME ?? "releasedock-packages";
+
+  const presigned = await presignR2Put({
+    env: {
+      R2_ACCOUNT_ID: c.env.R2_ACCOUNT_ID,
+      R2_ACCESS_KEY_ID: c.env.R2_ACCESS_KEY_ID,
+      R2_SECRET_ACCESS_KEY: c.env.R2_SECRET_ACCESS_KEY,
+    },
+    bucket,
+    key: r2Key,
+    expiresSeconds: expires_seconds as number | undefined,
+  });
+
+  return c.json({
+    upload_url: presigned.url,
+    method: presigned.method,
+    headers: presigned.headers,
+    r2_key: presigned.r2Key,
+    expires_at: presigned.expiresAt,
+    hint:
+      "直接对该 upload_url 发 PUT，请求体为文件内容，不要手动附加任何头部（尤其是 host 与 x-amz-content-sha256，" +
+      "由 HTTP 客户端自动处理即可，手动设置会导致签名校验失败）。上传成功后用相同的 r2_key 调用登记接口提交元数据。",
+  });
 });

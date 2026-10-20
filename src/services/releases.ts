@@ -68,6 +68,17 @@ export async function getReleaseByVersion(
     .first<ReleaseRow>();
 }
 
+/** 同 r2_key 是否已被已发布（live/archived）记录占用；用于阻止覆盖签发 */
+export async function getReleaseByKey(
+  db: D1Database,
+  r2Key: string,
+): Promise<ReleaseRow | null> {
+  return db
+    .prepare("SELECT * FROM releases WHERE r2_key = ? AND status IN ('live', 'archived') LIMIT 1")
+    .bind(r2Key)
+    .first<ReleaseRow>();
+}
+
 export async function listReleasesByStatus(
   db: D1Database,
   appId: string,

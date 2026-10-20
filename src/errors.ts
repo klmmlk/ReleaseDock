@@ -23,5 +23,9 @@ export const Errors = {
   pointerConflict: () => new AppError(409, "POINTER_CONFLICT", "乐观并发控制失败，当前指针已变化"),
   releaseNotPromotable: () => new AppError(409, "RELEASE_NOT_PROMOTABLE", "当前状态不允许上线"),
   rateLimited: () => new AppError(429, "RATE_LIMITED", "请求过于频繁，请稍后重试"),
+  uploadNotConfigured: () =>
+    new AppError(503, "UPLOAD_NOT_CONFIGURED", "服务端未配置 R2 S3 凭据，无法签发上传链接"),
+  keyAlreadyLive: () =>
+    new AppError(409, "KEY_ALREADY_LIVE", "该 R2 对象键已被已上线版本占用，请使用新版本号或新文件名"),
   internal: (message = "服务端错误") => new AppError(500, "INTERNAL_ERROR", message),
 };

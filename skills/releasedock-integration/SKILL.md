@@ -36,17 +36,25 @@ Python / C / C# / Go / Qt 等语言的最小可运行实现（库选型、代码
 
 ## 二、发布自动化（供 CI / 发布 AI 使用）
 
-标准流程：**上传 R2 → 登记（draft）→ 上线（promote）**，回滚/灰度调整不需要重新上传。
+标准流程：**申请预签名 URL → PUT 上传 → 登记（draft）→ 上线（promote）**，回滚/灰度调整不需要重新上传。
 
 ```bash
 BASE="https://releasedock.xxxxx.workers.dev"      # 以下属实际部署为准
 AUTH="Authorization: Bearer $RELEASEDOCK_ADMIN_TOKEN" # Token 必须来自环境变量/Secret，严禁写死
 
-# 1. 对象键约定：{app_id}/{channel}/{version}/{filename}
-npx wrangler r2 object put "releasedock-packages/com.yourco.app/stable/1.5.0/setup.exe" \
-  --file ./setup.exe --remote --content-type application/octet-stream
+# 1. 申请上传地址（对象键约定：{app_id}/{channel}/{version}/{filename}）
+curl -sf -X POST "$BASE/v1/admin/uploads/presign" -H "$AUTH" -H "Content-Type: application/json" -d '{
+  "app_id": "com.yourco.app", "channel": "stable", "version": "1.5.0", "filename": "setup.exe"
+}'
+# -> {"upload_url":"https://<account>.r2.cloudflarestorage.com/releasedock-packages/…?X-Amz-Signature=…",
+#     "method":"PUT","headers":{},"r2_key":"com.yourco.app/stable/1.5.0/setup.exe","expires_at":"…"}
 
-# 2. 登记为 draft（客户端不可见）。sha256=64位十六进制；changelog 为 1-50 条字符串数组
+# 2. 直接 PUT 文件内容到 upload_url。⚠️ 不要附加任何自定义请求头
+#    （尤其 host / x-amz-content-sha256 —— 交给 HTTP 客户端自动处理，手动设置会导致 403）
+curl -sf -X PUT --data-binary @./setup.exe "<upload_url>"
+
+
+# 3. 登记为 draft（客户端不可见）。sha256=64位十六进制；changelog 为 1-50 条字符串数组
 curl -sf -X POST "$BASE/v1/admin/releases" -H "$AUTH" -H "Content-Type: application/json" -d '{
   "app_id": "com.yourco.app", "channel": "stable", "version": "1.5.0",
   "r2_key": "com.yourco.app/stable/1.5.0/setup.exe",
@@ -55,13 +63,15 @@ curl -sf -X POST "$BASE/v1/admin/releases" -H "$AUTH" -H "Content-Type: applicat
 }'
 # → {"release_id":"rel_xxx",...}
 
-# 3. 上线（乐观并发控制：先查当前 live 指针；首次上线传 null 或省略）
+# 4. 上线（乐观并发控制：先查当前 live 指针；首次上线传 null 或省略）
 EXPECTED=$(curl -sf "$BASE/v1/admin/releases?app_id=com.yourco.app&channel=stable&status=live" \
   -H "$AUTH" | jq -r '.releases[0].id // "null"')
 curl -sf -X POST "$BASE/v1/admin/releases/rel_xxx/promote" -H "$AUTH" \
   -H "Content-Type: application/json" \
   -d "{\"expected_current_release_id\": $(if [ "$EXPECTED" = null ]; then echo null; else echo "\"$EXPECTED\""; fi)}"
 ```
+
+预签名 URL 默认 15 分钟有效（`expires_seconds` 可调，60–86400）；过期重新申请，不要重试旧 URL。服务端未配置 R2 S3 凭据时返回 503 `UPLOAD_NOT_CONFIGURED`，此时改用 `wrangler r2 object put` 或 S3 兼容工具上传；已被 live/archived 版本占用的对象键返回 409 `KEY_ALREADY_LIVE`，改用新版本号或文件名。
 
 **治理操作**（均要求 `expected_current_release_id` 或当前指针）：
 
@@ -70,7 +80,7 @@ curl -sf -X POST "$BASE/v1/admin/releases/rel_xxx/promote" -H "$AUTH" \
 - 强制更新阈值：`PATCH /v1/admin/apps/{app_id}/channels/{channel}` `{"min_supported_version":"1.3.0"}`；低于它的客户端查询返回 `mandatory=true`。
 - 排错：`GET /v1/admin/releases?app_id=&channel=&status=` 查看登记状态（draft/live/archived）。
 
-**CI 集成**：本仓库 `.github/workflows/release.yml` 是可直接复制的 GitHub Actions 模板（登记自动、上线手动触发）。需要的 Secrets：`CLOUDFLARE_API_TOKEN`（R2 写权限）、`RELEASEDOCK_ADMIN_TOKEN`。
+**CI 集成**：本仓库 `.github/workflows/release.yml` 是可直接复制的 GitHub Actions 模板（登记自动、上线手动触发）。只需要 `RELEASEDOCK_ADMIN_TOKEN` 一个 Secret —— 上传走预签名接口，无需 Cloudflare API Token。
 
 **红线**：不要对同一 `app_id + channel + version` 重复登记（409）；不要覆盖已上线版本的 R2 对象键（新版本用新键）；生产 `stable` 通道的 promote/rollback 应人工确认，自动化只做 draft 登记。
 

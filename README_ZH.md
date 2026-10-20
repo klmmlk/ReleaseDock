@@ -58,9 +58,15 @@ TOKEN="Authorization: Bearer dev-admin-token-change-me"
 curl -X POST $BASE/v1/admin/apps -H "$TOKEN" -H "Content-Type: application/json" \
   -d '{"app_id":"com.example.demo","name":"演示应用"}'
 
-# 2. 上传更新包到 R2（真实环境加 --remote）
-npx wrangler r2 object put releasedock-packages/com.example.demo/stable/1.0.0/setup.exe \
-  --file ./your-setup.exe --local
+# 2. 上传更新包（推荐）：向管理接口申请预签名 URL，下游只需管理 Token，无需 Cloudflare S3 凭据
+curl -X POST $BASE/v1/admin/uploads/presign -H "$TOKEN" -H "Content-Type: application/json" \
+  -d '{"app_id":"com.example.demo","channel":"stable","version":"1.0.0","filename":"setup.exe"}'
+# -> {"upload_url":"https://<account>.r2.cloudflarestorage.com/releasedock-packages/…?X-Amz-Signature=…",
+#     "method":"PUT","headers":{},"r2_key":"…","expires_at":"…"}
+curl -X PUT --data-binary @./your-setup.exe "<upload_url>"    # 不要附加任何自定义头
+
+# 备选（CI 侧持有 R2 凭据时）：
+# npx wrangler r2 object put releasedock-packages/com.example.demo/stable/1.0.0/setup.exe --file ./your-setup.exe --remote
 
 # 3. 登记版本（draft，客户端不可见）
 curl -X POST $BASE/v1/admin/releases -H "$TOKEN" -H "Content-Type: application/json" \
@@ -155,6 +161,11 @@ npx wrangler d1 create releasedock        # 把返回的 database_id 填入 wran
 npx wrangler r2 bucket create releasedock-packages   # 需先在控制台开通 R2
 npm run db:migrate:remote
 npx wrangler secret put ADMIN_TOKEN       # 生产管理 Token，勿与本地相同
+# 预签名上传需要 R2 S3 API Token（控制台 R2 → Manage API Tokens，权限 Object Read & Write，
+# 桶范围仅 releasedock-packages）；若只用 wrangler 上传则无需这三项
+npx wrangler secret put R2_ACCOUNT_ID
+npx wrangler secret put R2_ACCESS_KEY_ID
+npx wrangler secret put R2_SECRET_ACCESS_KEY
 npm run deploy
 ```
 
@@ -170,6 +181,7 @@ npm run deploy
 | Changelog 拼接范围 | 所有**已发布**版本（live + archived）。因上线会把旧版本置为 archived，仅查 live 将导致拼接失效 |
 | 上线/回滚校验 | 操作前校验 R2 对象存在，防止把缺文件的版本推上线（`R2_OBJECT_NOT_FOUND`） |
 | 应用管理 | 新增 `POST/GET /v1/admin/apps`（文档未定义，接入新应用必需） |
+| 更新包上传 | 新增 `POST /v1/admin/uploads/presign`：返回 15 分钟有效的 AWS SigV4 预签名 R2 PUT URL（path-style），下游只需管理 Token、无需 Cloudflare S3 凭据。需配置 `R2_ACCOUNT_ID`/`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` secret，否则返回 503 `UPLOAD_NOT_CONFIGURED`。**客户端不得附加任何自定义头**（手动设 host / x-amz-content-sha256 会导致签名失败）。已被 live/archived 版本占用的对象键拒绝签发（409 `KEY_ALREADY_LIVE`） |
 | 灰度比例调整 | 新增 `PATCH /v1/admin/releases/:releaseId`（文档 6.1 "可随时调整" 需要） |
 | 回滚并发控制 | `expected_current_release_id` 必填，防止误回滚 |
 | 速率限制 | Workers ratelimit 绑定：查询 120 次/分（按 client_id/IP），下载 30 次/分（按 IP），超限 429 |

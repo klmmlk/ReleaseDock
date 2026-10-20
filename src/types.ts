@@ -14,6 +14,12 @@ export interface Env {
   RATE_LIMIT_UPDATES?: RateLimit;
   /** 速率限制绑定：下载接口 30 次/分（beta 绑定，未配置时跳过限流） */
   RATE_LIMIT_DOWNLOAD?: RateLimit;
+  /** R2 S3 凭据（管理 Token 控制上传发布，可选——未配置时上传接口返回 503） */
+  R2_ACCOUNT_ID?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  /** 默认绑定的 R2 桶名（可省，路由代码会用 binding 名兜底） */
+  R2_BUCKET_NAME?: string;
 }
 
 // ---------- D1 行类型 ----------
