@@ -95,7 +95,10 @@ curl -X PATCH $BASE/v1/admin/apps/com.example.demo/channels/stable -H "$TOKEN" \
 
 # 8. Client-side check and download
 curl "$BASE/v1/updates/com.example.demo/stable?current=0.9.0&client_id=<uuid>"
-curl -O "$BASE/v1/download/rel_xxx"   # verify X-Checksum-Sha256
+# -> download_url is a short-lived R2 presigned URL (direct, does not go through the Worker);
+#    download_api_url is the Worker-proxied fallback; sha256 is in the JSON body.
+curl -o setup.exe "$(curl -s "$BASE/v1/updates/...&current=0.9.0" | jq -r .download_url)"
+sha256sum setup.exe   # compare with the JSON sha256 field
 ```
 
 > Windows note: inline Chinese text in `curl -d` may be sent as GBK from the console and stored garbled. Prefer writing the request body to a UTF-8 file and using `--data-binary @file.json`.
@@ -177,7 +180,8 @@ It is recommended to also protect `/v1/admin/*` with Cloudflare Access (service 
 | Topic | Decision |
 | :--- | :--- |
 | Changelog format (spec open question 6) | Structured string arrays `string[]` for both storage and API responses |
-| Download auth (spec open question 2) | None initially: unguessable `release_id` + HTTPS; `draft` downloads rejected with 404 |
+| Download transport | Query responses hand out a **short-lived R2 presigned GET URL** (`download_url`, 1h TTL) so the payload bypasses the Worker entirely; `download_api_url` is the Worker-proxied fallback and `download_expires_at` tells clients when to re-query. Rationale: measured on a cross-border link, Worker downloads were throttled to ~6 KB/s while the R2 direct URL did 20 MB in 2.5 s. Falls back to the Worker URL automatically when R2 credentials are absent |
+| Download auth (spec open question 2) | No auth on the payload: unguessable storage key + short-lived presigned URLs; `draft` releases are never signed |
 | Rollout | SHA-256 stable hash of `client_id` mod 100; misses fall back to the previous published release; no `client_id` means never in rollout |
 | Changelog stitching scope | All **published** releases (live + archived). Promoting archives the replaced release, so live-only queries would break multi-version stitching |
 | Promote/rollback validation | The R2 object must exist before the pointer moves, preventing broken releases (`R2_OBJECT_NOT_FOUND`) |

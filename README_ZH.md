@@ -94,7 +94,10 @@ curl -X PATCH $BASE/v1/admin/apps/com.example.demo/channels/stable -H "$TOKEN" \
 
 # 8. 客户端查询与下载
 curl "$BASE/v1/updates/com.example.demo/stable?current=0.9.0&client_id=<uuid>"
-curl -O "$BASE/v1/download/rel_xxx"   # 校验 X-Checksum-Sha256
+# download_url 是短时效 R2 预签名直链（不经过 Worker）；download_api_url 是 Worker 兜底地址；
+# sha256 在 JSON 响应里，下载完成后必须比对
+curl -o setup.exe "$(curl -s "$BASE/v1/updates/...&current=0.9.0" | jq -r .download_url)"
+sha256sum setup.exe
 ```
 
 > Windows 注意：curl -d 内联中文可能被控制台按 GBK 发出导致存储乱码，建议把请求体写成 UTF-8 文件后用 `--data-binary @file.json`。
@@ -176,7 +179,8 @@ npm run deploy
 | 事项 | 决策 |
 | :--- | :--- |
 | Changelog 格式（文档待确认 6） | 存储与返回均为结构化字符串数组 `string[]` |
-| 下载鉴权（文档待确认 2） | 初期不鉴权，依赖不可预测 `release_id`；`draft` 按 404 拒绝 |
+| 下载通道 | 查询响应下发**短时效 R2 预签名直链**（`download_url`，1 小时），载荷完全绕过 Worker；`download_api_url` 为 Worker 兜底，`download_expires_at` 供客户端判断何时需重新查询。原因：实测跨境链路上 Worker 下载被限速到约 6KB/s，R2 直链 20MB 仅 2.5 秒。未配置 R2 凭据时自动回退为 Worker 地址 |
+| 下载鉴权（文档待确认 2） | 载荷不鉴权：对象键不可猜测 + 预签名短时效；`draft` 版本永不签发 |
 | 灰度 | `client_id` SHA-256 稳定哈希 mod 100，未命中回退上一个已发布版本；无 `client_id` 不进灰度 |
 | Changelog 拼接范围 | 所有**已发布**版本（live + archived）。因上线会把旧版本置为 archived，仅查 live 将导致拼接失效 |
 | 上线/回滚校验 | 操作前校验 R2 对象存在，防止把缺文件的版本推上线（`R2_OBJECT_NOT_FOUND`） |

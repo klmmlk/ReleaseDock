@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import { adminApi, createApp, promote, rawApi, registerRelease } from "./helpers";
+import { adminApi, createApp, promote, publicApi, rawApi, registerRelease } from "./helpers";
 import type { Env } from "../src/types";
 
 // 测试用假凭据：签名算法自洽验证，不需要真实密钥
@@ -187,5 +187,110 @@ describe("预签名上传：签发内容", () => {
     const ttlMs = new Date(body.expires_at).getTime() - Date.now();
     expect(ttlMs).toBeGreaterThan(3500_000);
     expect(ttlMs).toBeLessThanOrEqual(3600_000);
+  });
+});
+
+describe("下载直链（预签名 GET）", () => {
+  it("签名与 AWS SigV4 规范一致（方法为 GET）", async () => {
+    const { presignR2Get } = await import("../src/services/presign");
+    const result = await presignR2Get({
+      env: PRESIGN_ENV,
+      bucket: "releasedock-packages",
+      key: "com.test.presign/stable/1.2.3/setup.exe",
+      expiresSeconds: 3600,
+    });
+    expect(result.method).toBe("GET");
+    expect(result.headers).toEqual({});
+
+    const url = new URL(result.url);
+    const credential = url.searchParams.get("X-Amz-Credential")!;
+    const amzDate = url.searchParams.get("X-Amz-Date")!;
+    const signature = url.searchParams.get("X-Amz-Signature")!;
+    expect(url.searchParams.get("X-Amz-Expires")).toBe("3600");
+
+    // 复算签名（方法 GET）
+    const enc = (s: string) =>
+      encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+    const params: Record<string, string> = {
+      "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+      "X-Amz-Credential": credential,
+      "X-Amz-Date": amzDate,
+      "X-Amz-Expires": "3600",
+      "X-Amz-SignedHeaders": "host",
+    };
+    const canonicalQuery = Object.keys(params)
+      .sort()
+      .map((k) => `${enc(k)}=${enc(params[k])}`)
+      .join("&");
+    const canonicalRequest = [
+      "GET",
+      "/releasedock-packages/com.test.presign/stable/1.2.3/setup.exe",
+      canonicalQuery,
+      "host:0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com\n",
+      "host",
+      "UNSIGNED-PAYLOAD",
+    ].join("\n");
+    const sha256 = async (text: string) => {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+      return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    };
+    const hmacHex = async (keyBytes: Uint8Array, data: string) => {
+      const raw = new ArrayBuffer(keyBytes.byteLength);
+      new Uint8Array(raw).set(keyBytes);
+      const key = await crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+      return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    };
+    const hexToBytes = (hex: string) =>
+      new Uint8Array(hex.match(/.{2}/g)!.map((b) => parseInt(b, 16)));
+    const dateShort = amzDate.slice(0, 8);
+    const kDate = hexToBytes(await hmacHex(new TextEncoder().encode("AWS4" + PRESIGN_ENV.R2_SECRET_ACCESS_KEY), dateShort));
+    const kRegion = hexToBytes(await hmacHex(kDate, "auto"));
+    const kService = hexToBytes(await hmacHex(kRegion, "s3"));
+    const kSigning = hexToBytes(await hmacHex(kService, "aws4_request"));
+    const stringToSign = [
+      "AWS4-HMAC-SHA256",
+      amzDate,
+      `${dateShort}/auto/s3/aws4_request`,
+      await sha256(canonicalRequest),
+    ].join("\n");
+    expect(await hmacHex(kSigning, stringToSign)).toBe(signature);
+  });
+
+  it("配置了 R2 凭据时，查询响应下发直链 + 兜底地址 + 过期时间", async () => {
+    const appId = "com.test.direct";
+    await createApp(appId);
+    const reg = await registerRelease({ appId, version: "1.0.0" });
+    await promote(reg.body.release_id, null);
+
+    const { default: app } = await import("../src/index");
+    const res = await app.request(
+      `/v1/updates/${appId}/stable?current=0.9.0&client_id=c1`,
+      {},
+      { ...(env as unknown as Env), ...PRESIGN_ENV },
+    );
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+
+    // 主地址是 R2 预签名直链（path-style，GET 签名）
+    expect(body.download_url).toContain("0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com");
+    expect(body.download_url).toContain(`/releasedock-packages/${appId}/stable/1.0.0/setup.bin`);
+    expect(body.download_url).toContain("X-Amz-Signature=");
+    // 兜底地址仍是 Worker 路由
+    expect(body.download_api_url).toMatch(/\/v1\/download\/rel_/);
+    expect(new Date(body.download_expires_at).getTime()).toBeGreaterThan(Date.now() + 3000_000);
+    expect(body.sha256).toBeTruthy();
+  });
+
+  it("未配置 R2 凭据时，回退为 Worker 下载地址", async () => {
+    const appId = "com.test.direct-fallback";
+    await createApp(appId);
+    const reg = await registerRelease({ appId, version: "1.0.0" });
+    await promote(reg.body.release_id, null);
+
+    const res = await publicApi(`/v1/updates/${appId}/stable?current=0.9.0`);
+    const body: any = await res.json();
+    expect(body.download_url).toMatch(/\/v1\/download\/rel_/);
+    expect(body.download_expires_at).toBeUndefined();
   });
 });

@@ -73,6 +73,10 @@ export interface UpdateResponse {
   mandatory: boolean;
   min_supported_version?: string;
   download_url?: string;
+  /** 预签名直链过期时间；客户端若过期（R2 返回 403）应重新查询本接口 */
+  download_expires_at?: string;
+  /** Worker 兜底下载地址（直链不可用时使用，如预签名未配置或链接过期后重试） */
+  download_api_url?: string;
   sha256?: string;
   size?: number;
   changelog?: ChangelogEntry[];

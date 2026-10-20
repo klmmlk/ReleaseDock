@@ -26,7 +26,7 @@ export interface PresignEnv {
 
 export interface PresignResult {
   url: string;
-  method: "PUT";
+  method: "GET" | "PUT";
   headers: Record<string, string>;
   expiresAt: string;
   r2Key: string;
@@ -124,6 +124,32 @@ export async function presignR2Put(args: {
   key: string;
   expiresSeconds?: number;
 }): Promise<PresignResult> {
+  return presignR2("PUT", args);
+}
+
+/**
+ * 预签名 GET：查询接口用它下发直链，客户端从 R2 直接下载而不经过 Worker。
+ * 适用场景：Worker 链路带宽受限/被限速，或下载量很大需要把流量卸载到 R2。
+ * R2 直链支持 Range，客户端更易实现断点续传。
+ */
+export async function presignR2Get(args: {
+  env: PresignEnv;
+  bucket: string;
+  key: string;
+  expiresSeconds?: number;
+}): Promise<PresignResult> {
+  return presignR2("GET", args);
+}
+
+async function presignR2(
+  method: "GET" | "PUT",
+  args: {
+    env: PresignEnv;
+    bucket: string;
+    key: string;
+    expiresSeconds?: number;
+  },
+): Promise<PresignResult> {
   const { env, bucket, key } = args;
   const expires = Math.min(Math.max(args.expiresSeconds ?? DEFAULT_EXPIRES_SECONDS, 60), 604800);
   const now = new Date();
@@ -157,7 +183,7 @@ export async function presignR2Put(args: {
   // SigV4：各段以 \n 分隔。canonicalHeaders 自身以 \n 结尾，因此与 signedHeaders 之间
   // 由两个 \n 形成规范要求的空行。
   const canonicalRequest = [
-    "PUT",
+    method,
     canonicalUri,
     canonicalQuery,
     canonicalHeaders,
@@ -179,7 +205,7 @@ export async function presignR2Put(args: {
 
   return {
     url,
-    method: "PUT",
+    method,
     // 不需要任何额外请求头：Host 由 HTTP 客户端自动设置，手动附带反而会破坏 R2 的签名校验
     headers: {} as Record<string, string>,
     expiresAt: new Date(now.getTime() + expires * 1000).toISOString(),

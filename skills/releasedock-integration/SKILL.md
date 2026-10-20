@@ -31,14 +31,14 @@ ReleaseDock 是基于 Cloudflare Workers + R2 + D1 的多软件升级分发系�
    GET {base_url}/v1/updates/{app_id}/{channel}?current={current_version}&client_id={client_id}
    ```
 4. **判定**：`update_available=false` 直接结束；`mandatory=true` 必须阻断旧版本使用并引导更新；`changelog_truncated=true` 提示"仅展示最近 5 个版本"。
-5. **下载并校验**：流式下载 `download_url`，边下边算 SHA-256，与 `sha256` 字段比对（等价于响应头 `X-Checksum-Sha256`）。**不一致：删除临时文件，重试一次；再失败提示用户**。⚠️ 下载接口不支持 Range 断点续传（恒返回 200 全量），中断需整体重下。
+5. **下载并校验**：`download_url` 是**短时效（1 小时）的 R2 预签名直链**，直接 GET 即可，不需要任何鉴权头，也不经过本服务。流式下载并边下边算 SHA-256，与 JSON 里的 `sha256` 比对（直链响应**不带** `X-Checksum-Sha256` 头）。**不一致：删除临时文件，重试一次**。直链支持 Range，可做断点续传；`download_expires_at` 之后直链会返回 403，此时重新查询本接口换新链接即可。`download_api_url` 是 Worker 兜底地址（始终可用，但速率可能受网络链路限制）。
 6. **安装**：校验通过后交给该软件自己的安装逻辑，安装完成后更新本地 `current_version`。
 
 ### 行为规则（必须遵守）
 
 - **检查时机**：启动后异步检查一次（不阻塞主流程）、之后每 6 小时静默一次、用户手动"检查更新"立即查。禁止在主界面加载时同步等待。
 - **网络失败**：静默重试，不打扰用户；查询接口 5xx 按"无更新"处理，下次再查。
-- **429 限流**：查询 120 次/分（按 `client_id`）、下载 30 次/分（按 IP）。收到 429 必须退避到下一个检查周期，**不要实现重试风暴**。
+- **429 限流**：查询接口 120 次/分（按 `client_id`）。收到 429 必须退避到下一个检查周期，**不要实现重试风暴**（直链下载由 R2 承载，不受本服务限流）。
 - **版本号**：`current` 必须是语义化版本 `X.Y.Z`（可带 `-prerelease`），格式非法返回 400。版本比较在服务端做，客户端只如实上报。
 - **灰度语义**：同一 `client_id` 永远落同一桶；被灰度排除时查询返回"无更新"，客户端无法也无需感知。
 - **响应字段是蛇形命名**（`update_available` / `download_url` / `sha256`），反序列化注意映射；`sha256` 比对统一转小写。
@@ -131,7 +131,9 @@ curl -sf -X POST "$BASE/v1/admin/releases/rel_xxx/promote" -H "$AUTH" \
 | 查询 404 `APP_NOT_FOUND` / `CHANNEL_NOT_FOUND` | app_id 拼错，或通道名大小写不符（须小写） | 核对配置；通道在首次登记时自动创建 |
 | 查询 400 `INVALID_REQUEST` | `current` 不是 `X.Y.Z` 形式（如 `v1.0`、`1.0`） | 规范化版本号，去掉 `v` 前缀、补足三段 |
 | 客户端"永远没有更新" | 未传 `client_id` 或该 id 落在灰度外 | 确认 client_id 持久化；检查该版本 `rollout`；查 `GET /v1/admin/releases?status=live` 的 rollout |
-| 客户端"有更新但下载 404" | release 是 draft 或 R2 对象缺失 | draft 不可下载是设计行为；对象缺失需重新上传并登记 |
+| 下载直链返回 403 | 预签名已过期（默认 1 小时） | 重新查询 updates 接口换新链接；不要缓存旧直链 |
+| 客户端"有更新但下载失败" | R2 对象缺失（draft 版本不会签发直链） | 检查对象键是否与上传一致；draft 需先上线 |
+| 浏览器/Electron 渲染进程直连报 CORS 错误 | R2 桶未配置 CORS | 给桶配置 CORS 规则允许你的来源；桌面进程（Python/C/主进程）不受影响 |
 | 429 `RATE_LIMITED` | 超过查询 120 次/分或下载 30 次/分 | 退避到下一个周期；检查是否有重试循环打爆配额 |
 
 ---

@@ -49,15 +49,38 @@ GET /v1/updates/{app_id}/{channel}?current=<semver>&client_id=<uuid>&include_cha
 
 ## 2. 文件下载（客户端）
 
+### 2.1 预签名直链（默认，`download_url`）
+
+查询响应的 `download_url` 是 R2 S3 的 **AWS SigV4 预签名 GET URL**（path-style，默认有效期 1 小时）：
+
+- 直接 GET，**不要附加任何自定义头**（`host` 由 HTTP 客户端自动处理）。
+- 不经过本服务：由 R2 直接返回文件，**支持 Range 请求**（可断点续传）。
+- 响应头由 R2 提供：`Content-Length`、`Content-Type: application/octet-stream`、`ETag`、`Last-Modified`、`Accept-Ranges: bytes`。
+  **没有** `X-Checksum-Sha256` —— 校验用查询响应 JSON 里的 `sha256` 字段。
+- 过期后返回 403 `Request has expired` → 重新查询 `/v1/updates/...` 换新链接；不要把直链长期缓存。
+- 浏览器 / Electron 渲染进程跨域直连需要在 R2 桶上配置 CORS；桌面进程无此限制。
+
+### 2.2 Worker 兜底（`download_api_url`）
+
 ```
-GET /v1/download/{release_id}
+GET {base_url}/v1/download/{release_id}
 ```
 
-- 仅 `live` / `archived` 可下载；`draft` 与不存在的记录统一返回 404 `RELEASE_NOT_FOUND`（不泄露存在性）。
-- R2 流式返回。响应头：`Content-Length`、`Content-Type: application/octet-stream`、`ETag`、`X-Checksum-Sha256`（与查询响应的 `sha256` 一致）、`Content-Disposition: attachment; filename="…"`、`Cache-Control: public, max-age=31536000, immutable`。
-- **不支持 Range/断点续传**（恒 200 全量）。
+- 始终可用；未配置 R2 S3 凭据时它就是 `download_url`。
+- 仅 `live` / `archived` 可下载；`draft` 与不存在的记录统一返回 404 `RELEASE_NOT_FOUND`。
+- Worker 流式转发 R2 内容。响应头：`Content-Length`、`Content-Type: application/octet-stream`、`ETag`、`X-Checksum-Sha256`（与 JSON 的 `sha256` 一致）、`Content-Disposition: attachment; filename="…"`、`Cache-Control: public, max-age=31536000, immutable`。
+- **不支持 Range**（恒 200 全量）。
 - 记录存在但 R2 文件缺失返回 404 `R2_OBJECT_NOT_FOUND`。
-- 超过 30 次/分（按 IP）返回 429 `RATE_LIMITED`。
+- 下载限流 30 次/分（按 IP），超限 429 `RATE_LIMITED`。
+
+### 2.3 查询响应中的下载字段
+
+| 字段 | 说明 |
+| :--- | :--- |
+| `download_url` | 主下载地址：有 R2 凭据时为预签名直链，否则为 Worker 地址 |
+| `download_expires_at` | 直链过期时间（ISO 8601）；Worker 地址时缺省 |
+| `download_api_url` | Worker 兜底地址，始终返回 |
+| `sha256` / `size` | 文件校验值与字节数，下载后必须比对 |
 
 ## 3. 管理接口（发布方，均需 Bearer Token，`Cache-Control: no-store`）
 
