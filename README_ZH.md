@@ -192,6 +192,12 @@ npm run deploy
 | 基础监控 | Analytics Engine 数据集 `releasedock_metrics`（已启用）：查询次数/更新可见性、下载次数/字节数，按 app_id 聚合。可在控制台 Workers → Analytics Engine 或 SQL API 查询，如 `SELECT * FROM releasedock_metrics WHERE _timestamp > NOW() - INTERVAL '1' HOUR` |
 | 限流与监控缺失行为 | 绑定未配置（本地/测试）时自动跳过，不阻塞主流程；生产限流已实测生效（30 次/分精确触发） |
 
+## 已知限制与备选方案
+
+**查询接口仍走 Worker 边缘节点**。在 Worker 链路被限速或阻断的网络上，`GET /v1/updates/...` 可能失败，而同文件的 R2 直链下载正常（实测跨境链路约 1/3 连接超时，而同一 20MB 文件从 R2 下载仅约 2.5 秒）。客户端应对查询做退避重试。
+
+备选方案——**清单也放到 R2**（暂未实现，确有需要再加）：发布时把 `manifests/{app_id}/{channel}.json` 写入 R2，内容包含当前生效版本、灰度规则、`min_supported_version` 与 changelog，客户端直接读 R2，让更新检查完全绕开 Worker。注意：按 `client_id` 的灰度分流与 changelog 拼接需要转移到客户端（或清单携带原始规则），且秒级回滚/撤销将取决于 R2 对象的更新时机。
+
 ## 尚未实现（阶段四，可选增强）
 
 - 管理后台/发布看板、下载短时效签名 URL、按 OS/arch 分发、发布审批流、更细粒度告警

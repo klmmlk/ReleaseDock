@@ -193,6 +193,12 @@ It is recommended to also protect `/v1/admin/*` with Cloudflare Access (service 
 | Analytics | Analytics Engine dataset `releasedock_metrics` (enabled): check counts/visibility and download counts/bytes per app. Query via the dashboard (Workers → Analytics Engine) or the SQL API, e.g. `SELECT * FROM releasedock_metrics WHERE _timestamp > NOW() - INTERVAL '1' HOUR` |
 | Missing bindings | Rate limiting and metrics are skipped automatically when bindings are absent (local/test); production enforcement verified (30/min trips precisely) |
 
+## Known limitation & deferred option
+
+The **query API still runs on the Worker edge**. On networks where the Worker path is throttled or blocked, `GET /v1/updates/...` may fail even though R2 direct downloads work fine (measured roughly 1/3 connection timeouts on a cross-border link, while the same 20 MB file downloaded from R2 in ~2.5 s). Clients should retry the query with backoff.
+
+Deferred option — **serve the manifest from R2 too** (not implemented; only add it if it becomes necessary): at release time, write a manifest object such as `manifests/{app_id}/{channel}.json` containing the effective release, rollout rules, `min_supported_version`, and changelog, and let clients read it directly from R2. That removes the Worker from the update-check path entirely. Caveats: per-`client_id` rollout bucketing and changelog stitching would have to move to the client (or the manifest must carry the raw rules), and instant rollback/revocation then depends on R2 object freshness.
+
 ## Not implemented (Phase 4, optional)
 
 - Admin dashboard / release board, short-lived signed download URLs, per-OS/arch distribution, release approval flow, finer-grained alerting
